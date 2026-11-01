@@ -32,7 +32,7 @@ function worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
         Base.invokelatest(worker_main, w)
     catch err
         # Nothing above this frame can handle an exception.
-        Core.println("ImprovedJuliaThreadPools: worker thread failed: ", sprint(showerror, err))
+        Core.println("DedicatedThreads: worker thread failed: ", sprint(showerror, err))
     end
     return C_NULL
 end

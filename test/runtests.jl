@@ -1,6 +1,6 @@
 using Test
-using ImprovedJuliaThreadPools
-using ImprovedJuliaThreadPools: owning_pool, cached_threads
+using DedicatedThreads
+using DedicatedThreads: owning_pool, cached_threads
 using Base.ScopedValues: ScopedValue, @with
 using Serialization
 
@@ -11,21 +11,21 @@ const TAG = ScopedValue(:unset)
 
 builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
 
-@testset "ImprovedJuliaThreadPools" begin
+@testset "DedicatedThreads" begin
     @testset "threads are created outside the built-in pools" begin
-        ThreadPool(3; name = :basic) do pool
+        DedicatedPool(3; name = :basic) do pool
             tids = threadids(pool)
             @test length(unique(tids)) == 3
             @test all(>(builtin_threads()), tids)
             @test Threads.nthreads(pool) == 3
             @test all(t -> owning_pool(t) === pool, tids)
             @test isopen(pool)
-            @test sprint(show, pool) == "ThreadPool(:basic, 3 threads, open, 0 queued)"
+            @test sprint(show, pool) == "DedicatedPool(:basic, 3 threads, open, 0 queued)"
         end
     end
 
     @testset "tasks run on pool threads" begin
-        ThreadPool(4) do pool
+        DedicatedPool(4) do pool
             tids = threadids(pool)
             ts = [spawn(Threads.threadid, pool) for _ in 1:1000]
             @test all(in(tids), fetch.(ts))
@@ -33,7 +33,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "results and exceptions" begin
-        ThreadPool(2) do pool
+        DedicatedPool(2) do pool
             @test fetch(spawn(() -> 41 + 1, pool)) == 42
             t = spawn(() -> error("boom"), pool)
             @test_throws TaskFailedException fetch(t)
@@ -46,7 +46,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
         # Each task spins until all have started, which only succeeds if they run in parallel
         # on distinct threads.
         n = 4
-        ThreadPool(n) do pool
+        DedicatedPool(n) do pool
             started = Threads.Atomic{Int}(0)
             ts = map(1:n) do _
                 spawn(pool) do
@@ -65,7 +65,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "blocked tasks free their thread" begin
-        ThreadPool(2) do pool
+        DedicatedPool(2) do pool
             gate = Threads.Event()
             m = 20
             waiting = Threads.Atomic{Int}(0)
@@ -85,7 +85,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     @testset "queued tasks run while every thread stays busy" begin
         # Spinners keep each thread's local queue non-empty indefinitely (they yield between
         # bursts); a newly queued task must still get a turn.
-        ThreadPool(2) do pool
+        DedicatedPool(2) do pool
             stop = Threads.Atomic{Bool}(false)
             spinners = map(1:4) do _
                 spawn(pool) do
@@ -109,7 +109,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "tasks stay on their thread across blocking" begin
-        ThreadPool(3) do pool
+        DedicatedPool(3) do pool
             ch = Channel{Int}(Inf)
             ts = map(1:50) do i
                 spawn(pool) do
@@ -125,7 +125,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "children inherit the pool" begin
-        ThreadPool(2; name = :outer) do pool
+        DedicatedPool(2; name = :outer) do pool
             tids = threadids(pool)
             r = fetch(spawn(pool) do
                 child = spawn(() -> (Threads.threadid(), current_pool()))
@@ -143,7 +143,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "caller's scoped values reach pool tasks" begin
-        ThreadPool(2) do pool
+        DedicatedPool(2) do pool
             @test fetch(spawn(() -> (TAG[], current_pool() === pool), pool)) == (:unset, true)
             @with TAG => :outer begin
                 @test fetch(spawn(() -> (TAG[], current_pool() === pool), pool)) == (:outer, true)
@@ -158,7 +158,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     @testset "spawn without a pool" begin
         @test current_pool() === nothing
         @test fetch(spawn(Threads.threadpool)) === :default
-        ThreadPool(2) do pool
+        DedicatedPool(2) do pool
             with_pool(pool) do
                 @test current_pool() === pool
                 @test fetch(spawn(Threads.threadid)) in threadids(pool)
@@ -168,7 +168,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "with_pool(nothing) leaves the pool" begin
-        ThreadPool(2) do pool
+        DedicatedPool(2) do pool
             r = fetch(spawn(pool) do
                 with_pool(nothing) do
                     (current_pool(), Threads.threadpool(fetch(spawn(Threads.threadid))))
@@ -181,8 +181,8 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "pools nest" begin
-        ThreadPool(2; name = :a) do a
-            ThreadPool(2; name = :b) do b
+        DedicatedPool(2; name = :a) do a
+            DedicatedPool(2; name = :b) do b
                 @test isempty(intersect(threadids(a), threadids(b)))
                 r = fetch(spawn(a) do
                     fetch(spawn(b) do
@@ -196,13 +196,13 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "nested fan-out" begin
-        ThreadPool(4) do pool
+        DedicatedPool(4) do pool
             @test fetch(spawn(() -> pfib(24), pool)) == fib(24)
         end
     end
 
     @testset "many tasks" begin
-        ThreadPool(4) do pool
+        DedicatedPool(4) do pool
             n = 10_000
             ts = map(1:n) do i
                 spawn(pool) do
@@ -216,7 +216,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "GC under load" begin
-        ThreadPool(4) do pool
+        DedicatedPool(4) do pool
             ts = map(1:16) do _
                 spawn(pool) do
                     s = 0
@@ -233,7 +233,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "close drains, rejects new work, and recycles threads" begin
-        pool = ThreadPool(2)
+        pool = DedicatedPool(2)
         done = Threads.Atomic{Int}(0)
         for _ in 1:100
             spawn(pool) do
@@ -250,14 +250,14 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
         @test all(t -> owning_pool(t) === nothing, tids)
         @test cached_threads() >= 2
         maxtid = Threads.maxthreadid()
-        ThreadPool(2) do reused
+        DedicatedPool(2) do reused
             @test sort(threadids(reused)) == sort(tids)
         end
         @test Threads.maxthreadid() == maxtid
     end
 
     @testset "concurrent close calls all wait" begin
-        pool = ThreadPool(1)
+        pool = DedicatedPool(1)
         gate = Threads.Event()
         spawn(() -> wait(gate), pool)
         c1 = @async close(pool)
@@ -270,7 +270,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "closing from inside the pool throws" begin
-        ThreadPool(1) do pool
+        DedicatedPool(1) do pool
             t = spawn(() -> close(pool), pool)
             err = try
                 fetch(t)
@@ -285,7 +285,7 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
     end
 
     @testset "pools cannot be serialized" begin
-        ThreadPool(1; name = :local_only) do pool
+        DedicatedPool(1; name = :local_only) do pool
             @test_throws ArgumentError Serialization.serialize(IOBuffer(), pool)
             @test_throws ArgumentError Serialization.serialize(IOBuffer(), (; data = 1, pool))
         end
@@ -293,11 +293,11 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
 
     @testset "process exits with live pools" begin
         code = """
-            using ImprovedJuliaThreadPools
-            closed = ThreadPool(2)
+            using DedicatedThreads
+            closed = DedicatedPool(2)
             fetch(spawn(() -> 1, closed))
             close(closed)
-            leaked = ThreadPool(2)
+            leaked = DedicatedPool(2)
             fetch(spawn(() -> sleep(0.01), leaked))
             """
         cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`

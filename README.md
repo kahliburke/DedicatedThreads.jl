@@ -1,6 +1,6 @@
-# ImprovedJuliaThreadPools.jl
+# DedicatedThreads.jl
 
-[![CI](https://github.com/kahliburke/ImprovedJuliaThreadPools.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/kahliburke/ImprovedJuliaThreadPools.jl/actions/workflows/CI.yml)
+[![CI](https://github.com/kahliburke/DedicatedThreads.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/kahliburke/DedicatedThreads.jl/actions/workflows/CI.yml)
 
 User-defined thread pools for Julia, created at runtime.
 
@@ -9,9 +9,9 @@ package adds pools of dedicated OS threads that you create, size, and close from
 a stock Julia runtime.
 
 ```julia
-using ImprovedJuliaThreadPools
+using DedicatedThreads
 
-ThreadPool(4; name = :io) do pool
+DedicatedPool(4; name = :io) do pool
     t = spawn(pool) do
         # Runs on one of the pool's 4 threads. Blocking (IO, locks, sleep) frees the thread
         # for other pool tasks.
@@ -25,7 +25,7 @@ end
 
 | | |
 |---|---|
-| `ThreadPool(n; name)` | Create a pool of `n` threads. The do-block form closes it afterwards. |
+| `DedicatedPool(n; name)` | Create a pool of `n` threads. The do-block form closes it afterwards. |
 | `spawn(f, pool)` | Run `f()` on the pool; returns a `Task`. |
 | `spawn(f)` | Run `f()` on the current pool, or on Julia's `:default` pool if there is none. |
 | `with_pool(f, pool)` | Make `pool` current for `f()` and every task it creates. |

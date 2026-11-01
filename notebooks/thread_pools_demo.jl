@@ -6,7 +6,7 @@ try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — runni
 
 Julia has two thread pools, `:default` and `:interactive`, and both are sized once at startup with `-t`. You can't create another pool, resize one, or keep a latency-sensitive workload away from a busy one.
 
-`ImprovedJuliaThreadPools` adds pools that you create, size, and close from Julia code on a stock runtime. Each pool owns dedicated OS threads, which are created at runtime and adopted by Julia. This notebook shows:
+`DedicatedThreads` adds pools that you create, size, and close from Julia code on a stock runtime. Each pool owns dedicated OS threads, which are created at runtime and adopted by Julia. This notebook shows:
 
 1. where pool threads sit next to Julia's built-in pools
 2. how tasks are spread across a pool
@@ -18,8 +18,8 @@ Julia has two thread pools, `:default` and `:interactive`, and both are sized on
 """
 
 #%% code id=setup
-using ImprovedJuliaThreadPools
-using ImprovedJuliaThreadPools: owning_pool, cached_threads
+using DedicatedThreads
+using DedicatedThreads: owning_pool, cached_threads
 
 (; julia = VERSION, interactive = Threads.nthreads(:interactive), default = Threads.nthreads(:default),
    maxthreadid = Threads.maxthreadid())
@@ -28,14 +28,14 @@ using ImprovedJuliaThreadPools: owning_pool, cached_threads
 @md"""
 ## 1. Pool threads next to the built-in pools
 
-`ThreadPool(n; name)` starts `n` OS threads, or reuses idle ones from earlier pools. Julia adopts each thread on entry, which gives it a thread id after the built-in pools and the GC threads. Julia's own `Threads.threadpool` reports these threads as `:foreign`; `owning_pool` says which user pool owns one.
+`DedicatedPool(n; name)` starts `n` OS threads, or reuses idle ones from earlier pools. Julia adopts each thread on entry, which gives it a thread id after the built-in pools and the GC threads. Julia's own `Threads.threadpool` reports these threads as `:foreign`; `owning_pool` says which user pool owns one.
 
 The `:slate` and `:slate_ui` pools belong to the notebook worker itself. `:slate` serves its control requests (status, cancel, the hub heartbeat) and background loops; `:slate_ui` serves what keeps the page live, including cells re-run by a reactive push like the chart in section 8. Both keep working while notebook code saturates `:default`.
 """
 
 #%% code id=layout resource
-io_pool = ThreadPool(2; name = :io)
-compute_pool = ThreadPool(3; name = :compute)
+io_pool = DedicatedPool(2; name = :io)
+compute_pool = DedicatedPool(3; name = :compute)
 # Pools are live handles on this process's threads, so this cell is tagged `resource`: it
 # re-runs on every open instead of being restored from Slate's cache. Re-running closes the old
 # pools first, returning their threads to the cache.
@@ -215,7 +215,7 @@ best_of(spawner; reps = 3) = minimum(time_on(spawner) for _ in 1:reps)
 
 time_on(f -> spawn(f, compute_pool))   # warm up
 pool_times = map(1:max_pool) do n
-    ThreadPool(n; name = Symbol("sized", n)) do pool
+    DedicatedPool(n; name = Symbol("sized", n)) do pool
         best_of(f -> spawn(f, pool))
     end
 end
@@ -233,7 +233,7 @@ echart(series(:line, collect(1:max_pool), pool_times[1] ./ pool_times; name = "u
 live_run = let
     used = Set{Int}()
     lk = ReentrantLock()
-    elapsed = ThreadPool(live_size; name = :live) do pool
+    elapsed = DedicatedPool(live_size; name = :live) do pool
         time_on(f -> spawn(pool) do
             f()
             @lock lk push!(used, Threads.threadid())
@@ -257,7 +257,7 @@ lifecycle = let
     maxtid_before = Threads.maxthreadid()
 
     # close() drains queued work before returning.
-    pool = ThreadPool(2; name = :short_lived)
+    pool = DedicatedPool(2; name = :short_lived)
     finished = Threads.Atomic{Int}(0)
     for _ in 1:200
         spawn(pool) do
@@ -276,7 +276,7 @@ lifecycle = let
     # 50 more pools of 4 threads, created and closed in turn.
     t0 = time()
     for i in 1:50
-        ThreadPool(p -> fetch(spawn(() -> i, p)), 4)
+        DedicatedPool(p -> fetch(spawn(() -> i, p)), 4)
     end
     per_pool_ms = 1000 * (time() - t0) / 50
 
@@ -329,7 +329,7 @@ slate_on_cleanup(() -> foreach(stop -> stop[] = true, spinner_flags))
 (; default_spinners = default_load, compute_spinners = compute_load)
 
 #%% code id=live_monitor resource
-monitor_pool = ThreadPool(1; name = :monitor)
+monitor_pool = DedicatedPool(1; name = :monitor)
 monitor_running = Threads.Atomic{Bool}(true)
 slate_on_cleanup(() -> (monitor_running[] = false; close(monitor_pool)))
 

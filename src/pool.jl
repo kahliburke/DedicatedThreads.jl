@@ -1,8 +1,8 @@
 @enum PoolState::UInt8 OPEN CLOSING CLOSED
 
 """
-    ThreadPool(n::Integer; name::Symbol)
-    ThreadPool(f, n::Integer; name::Symbol)
+    DedicatedPool(n::Integer; name::Symbol)
+    DedicatedPool(f, n::Integer; name::Symbol)
 
 A pool of `n` dedicated OS threads, created at runtime and separate from Julia's `:default` and
 `:interactive` pools. Run work on it with [`spawn`](@ref); tasks it runs, and their children,
@@ -14,7 +14,7 @@ are started.
 A task starts on whichever pool thread is free and then stays on that thread for its lifetime;
 blocking operations (locks, IO, `sleep`, `wait`) free the thread for other pool tasks.
 """
-mutable struct ThreadPool
+mutable struct DedicatedPool
     const name::Symbol
     const workers::Vector{Worker}
     # Guards `queue`, `idle`, and writes to `state`. Critical sections are a few instructions and
@@ -38,7 +38,7 @@ mutable struct ThreadPool
     # Scope binding `current_pool()` to this pool, for tasks spawned from an empty scope.
     root_scope::Scope
 
-    function ThreadPool(n::Integer; name::Symbol = default_pool_name())
+    function DedicatedPool(n::Integer; name::Symbol = default_pool_name())
         n >= 1 || throw(ArgumentError("a thread pool needs at least one thread, got $n"))
         pool = new(name, Worker[], Threads.SpinLock(), Task[], 0, Worker[], 0, OPEN,
                    Threads.Event(), Channel{Nothing}(n), Threads.Event())
@@ -52,8 +52,8 @@ mutable struct ThreadPool
     end
 end
 
-function ThreadPool(f, n::Integer; kwargs...)
-    pool = ThreadPool(n; kwargs...)
+function DedicatedPool(f, n::Integer; kwargs...)
+    pool = DedicatedPool(n; kwargs...)
     try
         return f(pool)
     finally
@@ -64,7 +64,7 @@ end
 const POOL_COUNTER = Threads.Atomic{Int}(0)
 default_pool_name() = Symbol("pool", Threads.atomic_add!(POOL_COUNTER, 1) + 1)
 
-const CURRENT_POOL = ScopedValue{Union{Nothing,ThreadPool}}(nothing)
+const CURRENT_POOL = ScopedValue{Union{Nothing,DedicatedPool}}(nothing)
 
 """
     current_pool()
@@ -75,7 +75,7 @@ and inherited by every task a pool runs. `nothing` outside any pool.
 current_pool() = CURRENT_POOL[]
 
 """
-    with_pool(f, pool::ThreadPool)
+    with_pool(f, pool::DedicatedPool)
     with_pool(f, nothing)
 
 Call `f()` with `pool` as the [`current_pool`](@ref), so `spawn` calls made by `f` and by tasks
@@ -83,13 +83,13 @@ it creates go to `pool`. With `nothing`, `f()` runs outside any pool and its `sp
 Julia's `:default` pool, even when called from a pool task; for code that hosts other code on a
 pool without making that pool the guest's default.
 """
-with_pool(f, pool::Union{Nothing,ThreadPool}) = @with CURRENT_POOL => pool f()
+with_pool(f, pool::Union{Nothing,DedicatedPool}) = @with CURRENT_POOL => pool f()
 
 # Wraps a spawned function to account for its completion, and marks the task as belonging to
 # `pool` (read back through `current_task().code`).
 struct PoolJob{F}
     f::F
-    pool::ThreadPool
+    pool::DedicatedPool
 end
 
 function (job::PoolJob)()
@@ -101,14 +101,14 @@ function (job::PoolJob)()
 end
 
 """
-    spawn(f, pool::ThreadPool) -> Task
+    spawn(f, pool::DedicatedPool) -> Task
     spawn(f) -> Task
 
 Run `f()` on a thread of `pool` and return its `Task`; `fetch` it for the result. Without a pool,
 submit to [`current_pool`](@ref), or to Julia's `:default` pool if there is none, so code written
 against `spawn` runs in whichever pool its caller chose.
 """
-function spawn(f, pool::ThreadPool)
+function spawn(f, pool::DedicatedPool)
     task = Task(PoolJob(f, pool))
     if CURRENT_POOL[] !== pool
         parent = current_scope()
@@ -123,7 +123,7 @@ function spawn(f)
     return pool === nothing ? Threads.@spawn(f()) : spawn(f, pool)
 end
 
-function submit!(pool::ThreadPool, task::Task)
+function submit!(pool::DedicatedPool, task::Task)
     w = @lock pool.lock begin
         if @atomic(pool.state) != OPEN
             :closed
@@ -139,7 +139,7 @@ function submit!(pool::ThreadPool, task::Task)
     return task
 end
 
-function task_done!(pool::ThreadPool)
+function task_done!(pool::DedicatedPool)
     # `close` stores CLOSING before reading `outstanding`, and this decrements before reading
     # `state`, so at least one side sees the pool drained.
     remaining = @atomic pool.outstanding -= 1
@@ -152,7 +152,7 @@ end
 # but takes one per turn when no thread in the pool is idle, so new tasks share busy threads
 # round-robin instead of waiting for the load to end. A taken task is pinned to this thread and
 # runs once the dispatcher yields.
-function dispatch(pool::ThreadPool, w::Worker)
+function dispatch(pool::DedicatedPool, w::Worker)
     tid = @atomic w.tid
     while true
         @atomic(pool.state) == CLOSED && return
@@ -189,16 +189,16 @@ function dispatch(pool::ThreadPool, w::Worker)
     end
 end
 
-worker_released!(pool::ThreadPool) = put!(pool.released, nothing)
+worker_released!(pool::DedicatedPool) = put!(pool.released, nothing)
 
 """
-    close(pool::ThreadPool)
+    close(pool::DedicatedPool)
 
 Stop accepting work, wait for every spawned task to finish (including queued ones), then return
 the pool's threads to the cache. Closing from one of the pool's own tasks throws, since it would
 wait for itself.
 """
-function Base.close(pool::ThreadPool)
+function Base.close(pool::DedicatedPool)
     ct = current_task()
     # Root tasks (the main task, a thread's initial task) have no `code`.
     job = isdefined(ct, :code) ? ct.code : nothing
@@ -232,29 +232,29 @@ end
 
 # A pool is bound to OS threads in this process. A deserialized copy (from a cache, or another
 # process) would accept tasks that no thread ever runs, so refuse to serialize one.
-function Serialization.serialize(::AbstractSerializer, pool::ThreadPool)
-    throw(ArgumentError("ThreadPool :$(pool.name) is bound to this process's threads and cannot be serialized"))
+function Serialization.serialize(::AbstractSerializer, pool::DedicatedPool)
+    throw(ArgumentError("DedicatedPool :$(pool.name) is bound to this process's threads and cannot be serialized"))
 end
 
-Base.isopen(pool::ThreadPool) = @atomic(pool.state) == OPEN
+Base.isopen(pool::DedicatedPool) = @atomic(pool.state) == OPEN
 
 """
-    Threads.nthreads(pool::ThreadPool)
+    Threads.nthreads(pool::DedicatedPool)
 
 Number of threads in `pool`.
 """
-Threads.nthreads(pool::ThreadPool) = length(pool.workers)
+Threads.nthreads(pool::DedicatedPool) = length(pool.workers)
 
 """
-    threadids(pool::ThreadPool)
+    threadids(pool::DedicatedPool)
 
 Julia thread ids of the threads in `pool`.
 """
-threadids(pool::ThreadPool) = [@atomic(w.tid) for w in pool.workers]
+threadids(pool::DedicatedPool) = [@atomic(w.tid) for w in pool.workers]
 
-function Base.show(io::IO, pool::ThreadPool)
+function Base.show(io::IO, pool::DedicatedPool)
     state = lowercase(string(@atomic pool.state))
     queued = @lock pool.lock length(pool.queue)
-    print(io, "ThreadPool(:", pool.name, ", ", length(pool.workers), " threads, ", state,
+    print(io, "DedicatedPool(:", pool.name, ", ", length(pool.workers), " threads, ", state,
           ", ", queued, " queued)")
 end

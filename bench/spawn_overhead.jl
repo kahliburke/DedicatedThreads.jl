@@ -2,7 +2,7 @@
 #
 #   julia -t 4 --project bench/spawn_overhead.jl
 
-using ImprovedJuliaThreadPools
+using DedicatedThreads
 
 function ns_per_task(spawner, n)
     GC.gc()
@@ -16,7 +16,7 @@ end
 best(spawner; n = 100_000, reps = 5) = (ns_per_task(spawner, 10_000); minimum(ns_per_task(spawner, n) for _ in 1:reps))
 
 nt = Threads.nthreads(:default)
-results = ThreadPool(nt; name = :bench) do pool
+results = DedicatedPool(nt; name = :bench) do pool
     (
         pool_from_outside = best(i -> spawn(() -> i, pool)),
         pool_from_with_pool = with_pool(() -> best(i -> spawn(() -> i)), pool),
