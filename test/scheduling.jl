@@ -1,6 +1,13 @@
 # Real-time pools, waiting on an address, and deadline logs.
 
 # Inside a function, as a loop would record: at top level the log is a global and dispatch allocates.
+# An iteration over a zero budget: the clock can read the same tick twice, so wait for it to move.
+function overrun!(log)
+    tk = begin_iteration(log)
+    while time_ns() == tk[1] end
+    end_iteration!(log, tk, 0)
+end
+
 function record_allocs(log)
     end_iteration!(log, begin_iteration(log), 0)
     @allocated end_iteration!(log, begin_iteration(log), 0)
@@ -125,7 +132,7 @@ end
     s = deadline_stats(log)
     @test s.iterations == 5 && s.overruns == 2 && s.with_gc >= 1 && s.worst_ms >= 10
     for _ in 1:10
-        end_iteration!(log, begin_iteration(log), 0)
+        overrun!(log)
     end
     @test length(overruns(log)) == 4                       # the newest, within capacity
     @test deadline_stats(log).overruns == 12
