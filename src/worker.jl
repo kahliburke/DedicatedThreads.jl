@@ -45,7 +45,9 @@ function worker_main(w::Worker)
     notify(w.started)
     for (pool, index) in w.assignments
         set_thread_name(string(pool.name, '-', index))
+        worker_joined!(pool, index)
         dispatch(pool, w)
+        worker_leaving!(pool, index)
         @atomic w.pool = nothing
         set_thread_name("jlpool-idle")
         @lock CACHE_LOCK push!(IDLE_WORKERS, w)

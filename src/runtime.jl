@@ -80,6 +80,14 @@ function allow_task_switching()
 end
 
 """
+    gc_total_ns() -> UInt64
+
+The garbage collector's running total of time spent collecting, in nanoseconds. Reads the
+runtime's counters without allocating.
+"""
+gc_total_ns() = UInt64(Base.gc_num().total_time)
+
+"""
     set_thread_name(name::AbstractString)
 
 Name the calling OS thread for profilers and debuggers. Best effort: names are truncated to

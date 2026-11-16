@@ -168,6 +168,46 @@ the running process, so a pool saved during precompilation would have no threads
 `close(pool)` waits for every task, queued ones included, and returns the threads to a
 process-wide cache. Later pools take threads from the cache before starting new ones.
 
+### Loops with deadlines
+
+An audio block, a video frame or a control tick has to finish on time, every time. Three things
+get in its way, and the package handles each:
+
+- **Other processes.** `realtime = Realtime(period = …)` puts the pool's threads under real-time
+  scheduling: the Mach time-constraint policy on macOS, `SCHED_FIFO` on Linux (which needs a
+  real-time allowance). Threads go back to the ordinary policy when the pool closes.
+  `realtime_granted(pool)` says whether the system agreed.
+- **Waiting.** `wait_on_address(p, expected)` parks the thread in the OS until the word at `p`
+  changes, and `wake_address(p)` wakes it. The thread is parked in a GC-safe call, so a garbage
+  collection never waits for it. With `shared = true` the word can live in memory shared with
+  another process. `Parker` wraps this as a park/unpark pair for one waiting thread.
+- **Knowing why one was late.** A `DeadlineLog` records each iteration that overran its budget,
+  with the garbage-collection time inside it. Recording doesn't allocate.
+
+```julia
+using DedicatedThreads
+
+block = 512 / 48_000                                   # seconds per audio block
+audio = DedicatedPool(1; name = :audio, realtime = Realtime(period = block))
+log = DeadlineLog()
+ready = Parker()
+
+spawn(audio) do
+    while true
+        park(ready)                                    # until a block is wanted
+        tk = begin_iteration(log)
+        render_block()
+        end_iteration!(log, tk, round(Int, 0.8block * 1e9))
+    end
+end
+
+unpark(ready)                                          # from wherever blocks are requested
+deadline_stats(log)    # (iterations = …, overruns = …, with_gc = …, worst_ms = …)
+```
+
+A collection still stops every thread running Julia code, real-time or not. A loop that must never
+miss renders ahead of its deadline, and the log shows how much margin it needs.
+
 ## API
 
 | | |
@@ -183,6 +223,14 @@ process-wide cache. Later pools take threads from the cache before starting new 
 | `isopen(pool)` | Whether the pool still accepts work. |
 | `threadids(pool)` | The pool's Julia thread ids. |
 | `Threads.nthreads(pool)` | The number of threads in the pool. |
+| `DedicatedPool(n; realtime = Realtime(period, compute, constraint))` | A pool whose threads run under real-time scheduling. |
+| `realtime_granted(pool)` | For each thread, whether the system granted the real-time request. |
+| `realtime!(rt)`, `realtime!(nothing)`, `isrealtime()` | Real-time scheduling for the calling thread, on or off, and whether it has it. |
+| `wait_on_address(p, expected; timeout, shared)` | Park until the word at `p` differs from `expected`, GC-safe. |
+| `wake_address(p; all, shared)` | Wake threads parked on `p`. |
+| `Parker()`, `park(p; timeout)`, `unpark(p)` | Park one thread until another wakes it; an early wakeup is kept. |
+| `DeadlineLog()`, `begin_iteration`, `end_iteration!` | Record a loop's overruns and the GC time inside them, without allocating. |
+| `overruns(log)`, `deadline_stats(log)` | The overruns kept, and a summary. |
 
 ## Performance
 
@@ -238,7 +286,8 @@ pool (`julia -t 4 --project bench/spawn_overhead.jl`):
 - **Threads are never destroyed.** `Threads.maxthreadid()` grows to the largest number of pool
   threads held at once.
 - **Blocking C calls hold the thread.** A `ccall` that blocks occupies its pool thread for the
-  duration, as on any Julia thread.
+  duration, as on any Julia thread. `wait_on_address` and `park` block the same way, but in a
+  GC-safe call, so collections don't wait for them.
 - **`close` waits for every task.** It does not cancel anything, and it throws if called from
   one of the pool's own tasks. A task that never yields keeps `close` from returning.
 - **Runtime internals.** The package uses unexported runtime functions (`jl_set_task_tid`,

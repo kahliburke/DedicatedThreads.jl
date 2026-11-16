@@ -1,8 +1,8 @@
 @enum PoolState::UInt8 OPEN CLOSING CLOSED
 
 """
-    DedicatedPool(n::Integer; name::Symbol)
-    DedicatedPool(f, n::Integer; name::Symbol)
+    DedicatedPool(n::Integer; name::Symbol, realtime::Union{Nothing,Realtime} = nothing)
+    DedicatedPool(f, n::Integer; name::Symbol, realtime = nothing)
 
 A pool of `n` dedicated OS threads, created at runtime and separate from Julia's `:default` and
 `:interactive` pools. Run work on it with [`spawn`](@ref); tasks it runs, and their children,
@@ -13,9 +13,18 @@ are started.
 
 A task starts on whichever pool thread is free and then stays on that thread for its lifetime;
 blocking operations (locks, IO, `sleep`, `wait`) free the thread for other pool tasks.
+
+With `realtime`, each thread asks for real-time scheduling (see [`Realtime`](@ref)) while it
+belongs to the pool, and returns to the ordinary policy when the pool closes; whether the system
+granted it is [`realtime_granted`](@ref).
 """
 mutable struct DedicatedPool
     const name::Symbol
+    const realtime::Union{Nothing,Realtime}
+    # Whether each worker's real-time request was granted, set as the worker joins.
+    const granted::Vector{Bool}
+    # One item per worker once it has applied the pool's scheduling policy.
+    const joined::Channel{Nothing}
     const workers::Vector{Worker}
     # Guards `queue`, `idle`, and writes to `state`. Critical sections are a few instructions and
     # never block, so a spin lock beats parking on contention.
@@ -38,15 +47,19 @@ mutable struct DedicatedPool
     # Scope binding `current_pool()` to this pool, for tasks spawned from an empty scope.
     root_scope::Scope
 
-    function DedicatedPool(n::Integer; name::Symbol = default_pool_name())
+    function DedicatedPool(n::Integer; name::Symbol = default_pool_name(), realtime::Union{Nothing,Realtime} = nothing)
         n >= 1 || throw(ArgumentError("a thread pool needs at least one thread, got $n"))
-        pool = new(name, Worker[], Threads.SpinLock(), Task[], 0, Worker[], 0, OPEN,
-                   Threads.Event(), Channel{Nothing}(n), Threads.Event())
+        pool = new(name, realtime, fill(false, n), Channel{Nothing}(n), Worker[], Threads.SpinLock(), Task[], 0,
+                   Worker[], 0, OPEN, Threads.Event(), Channel{Nothing}(n), Threads.Event())
         pool.root_scope = Scope(nothing, CURRENT_POOL => pool)
         append!(pool.workers, acquire_workers(Int(n)))
         for (index, w) in enumerate(pool.workers)
             @atomic w.pool = pool
             put!(w.assignments, (pool, index))
+        end
+        # Returned once every thread runs under the pool's policy, so `realtime_granted` is final.
+        for _ in 1:n
+            take!(pool.joined)
         end
         return pool
     end
@@ -190,6 +203,23 @@ function dispatch(pool::DedicatedPool, w::Worker)
 end
 
 worker_released!(pool::DedicatedPool) = put!(pool.released, nothing)
+
+# Runs on worker `index`'s thread as it joins `pool`, before it takes any task.
+function worker_joined!(pool::DedicatedPool, index::Int)
+    pool.realtime === nothing || (pool.granted[index] = realtime!(pool.realtime))
+    put!(pool.joined, nothing)
+end
+
+# Runs on the worker's thread as it leaves `pool`, so the next pool gets an ordinary thread.
+worker_leaving!(pool::DedicatedPool, index::Int) = pool.granted[index] && realtime!(nothing)
+
+"""
+    realtime_granted(pool::DedicatedPool) -> Vector{Bool}
+
+For each thread of `pool`, whether the system granted the pool's real-time request; all `false`
+for a pool without one.
+"""
+realtime_granted(pool::DedicatedPool) = copy(pool.granted)
 
 """
     close(pool::DedicatedPool)

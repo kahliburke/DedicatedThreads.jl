@@ -306,4 +306,6 @@ builtin_threads() =Threads.nthreads(:interactive) + Threads.nthreads(:default)
         process_running(p) && kill(p)
         @test success(p)
     end
+
+    include("scheduling.jl")
 end
