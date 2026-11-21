@@ -1,6 +1,6 @@
 name = "DedicatedThreads"
 uuid = "9d6577c3-9664-4440-a53f-cec765ebc045"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
 
 [deps]
