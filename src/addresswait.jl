@@ -1,7 +1,8 @@
 # Waiting for a word of memory to change, parked in the OS rather than spinning: macOS's
-# os_sync_wait_on_address, Linux's futex. The wait is a GC-safe foreign call, so a garbage
-# collection proceeds without the parked thread, which matters for threads that wait most of the
-# time. With `shared`, the word may live in memory mapped by several processes.
+# os_sync_wait_on_address, Linux's futex, Windows's WaitOnAddress. The wait is a GC-safe foreign
+# call, so a garbage collection proceeds without the parked thread, which matters for threads that
+# wait most of the time. With `shared`, the word may live in memory mapped by several processes
+# (Windows parks only within a process, so a shared wait there naps and looks again).
 
 const HAS_OS_SYNC = Ref(false)
 
@@ -45,15 +46,24 @@ function wait_on_address(p::Ptr{UInt32}, expected::UInt32; timeout::Real = Inf, 
             @ccall(gc_safe = true, syscall(SYS_FUTEX::Clong; p::Ptr{UInt32}, op::Cint, expected::UInt32, ts::Ref{Tuple{Int64,Int64}}, C_NULL::Ptr{Cvoid}, 0::Cint)::Clong) :
             @ccall(gc_safe = true, syscall(SYS_FUTEX::Clong; p::Ptr{UInt32}, op::Cint, expected::UInt32, C_NULL::Ptr{Cvoid}, C_NULL::Ptr{Cvoid}, 0::Cint)::Clong)
         return r < 0 && Libc.errno() == ETIMEDOUT ? :timeout : :changed
+    elseif Sys.iswindows() && !shared
+        ms = isfinite(timeout) ? UInt32(min(cld(tns, 1_000_000), 0xfffffffe)) : 0xffffffff   # INFINITE
+        r = @ccall gc_safe = true "kernelbase".WaitOnAddress(p::Ptr{UInt32}, Ref(expected)::Ref{UInt32}, 4::Csize_t, ms::UInt32)::Cint
+        return r == 0 && Libc.GetLastError() == ERROR_TIMEOUT ? :timeout : :changed
     end
-    # No address wait on this platform: nap and look again.
+    # No address wait for this: nap and look again.
     deadline = isfinite(timeout) ? time_ns() + tns : typemax(UInt64)
     while unsafe_load(p, :acquire) == expected
         time_ns() >= deadline && return :timeout
-        @ccall gc_safe = true usleep(100::Cuint)::Cint
+        nap()
     end
     return :changed
 end
+
+const ERROR_TIMEOUT = 1460
+
+"A short sleep in the OS, GC-safe: a tenth of a millisecond, or Windows's shortest."
+nap() = Sys.iswindows() ? (@ccall gc_safe = true "kernel32".Sleep(1::UInt32)::Cvoid) : (@ccall gc_safe = true usleep(100::Cuint)::Cint; nothing)
 
 """
     wake_address(p::Ptr{UInt32}; all = true, shared = false)
@@ -69,6 +79,8 @@ function wake_address(p::Ptr{UInt32}; all::Bool = true, shared::Bool = false)
     elseif Sys.islinux()
         op = shared ? FUTEX_WAKE : FUTEX_WAKE | FUTEX_PRIVATE_FLAG
         @ccall syscall(SYS_FUTEX::Clong; p::Ptr{UInt32}, op::Cint, (all ? typemax(Cint) : Cint(1))::Cint)::Clong
+    elseif Sys.iswindows() && !shared
+        all ? @ccall("kernelbase".WakeByAddressAll(p::Ptr{UInt32})::Cvoid) : @ccall("kernelbase".WakeByAddressSingle(p::Ptr{UInt32})::Cvoid)
     end
     return nothing
 end

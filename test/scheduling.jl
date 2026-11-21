@@ -16,10 +16,10 @@ end
 @testset "real-time pools" begin
     rt = Realtime(period = 0.005)
     rt_tids = DedicatedPool(2; name = :rt, realtime = rt) do pool
-        if Sys.isapple() || Sys.islinux()
+        if Sys.isapple() || Sys.islinux() || Sys.iswindows()
             granted = realtime_granted(pool)
-            # Linux grants SCHED_FIFO only with a real-time allowance; macOS always does.
-            Sys.isapple() && @test all(granted)
+            # Linux grants SCHED_FIFO only with a real-time allowance (or RealtimeKit); macOS and Windows (MMCSS) always do.
+            (Sys.isapple() || Sys.iswindows()) && @test all(granted)
             @test all(fetch.([spawn(isrealtime, pool) for _ in 1:20]) .== granted[1])
         end
         threadids(pool)

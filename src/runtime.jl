@@ -101,6 +101,8 @@ function set_thread_name(name::AbstractString)
         ccall(:pthread_setname_np, Cint, (Cstring,), s)
     elseif Sys.islinux()
         ccall(:pthread_setname_np, Cint, (UInt, Cstring), ccall(:pthread_self, UInt, ()), s)
+    elseif Sys.iswindows()
+        ccall((:SetThreadDescription, "kernel32"), Clong, (Ptr{Cvoid}, Cwstring), ccall((:GetCurrentThread, "kernel32"), Ptr{Cvoid}, ()), s)
     end
     return nothing
 end
