@@ -4,7 +4,7 @@ using Base.ScopedValues: ScopedValue, Scope, @with
 using Serialization: Serialization, AbstractSerializer
 
 export DedicatedPool, spawn, with_pool, current_pool, threadids
-export Realtime, realtime!, isrealtime, realtime_granted
+export Realtime, realtime!, isrealtime, realtime_granted, qos!, qos, qos_granted
 export wait_on_address, wake_address, Parker, park, unpark
 export DeadlineLog, Overrun, begin_iteration, end_iteration!, overruns, deadline_stats
 

@@ -95,3 +95,37 @@ function isrealtime()
     end
     return false
 end
+
+# Quality of service: on macOS a thread's class tells the scheduler how much its work matters to the
+# user. The higher classes run on the performance cores and ahead of lower ones; `:utility` and
+# `:background` drift to the efficiency cores. Elsewhere there are no classes.
+
+"The quality-of-service classes, highest first, by name (macOS's `qos_class_t` values)."
+const QOS_CLASSES = (interactive = 0x21, initiated = 0x19, default = 0x15, utility = 0x11, background = 0x09)
+
+"""
+    qos!(class::Symbol) -> Bool
+
+Put the calling OS thread in quality-of-service class `class` (one of `keys(QOS_CLASSES)`). Returns
+whether the system took it: always `false` off macOS, where there are no classes.
+"""
+function qos!(class::Symbol)
+    c = get(QOS_CLASSES, class, nothing)
+    c === nothing && throw(ArgumentError("a quality-of-service class is one of $(join(keys(QOS_CLASSES), ", ")), got $class"))
+    Sys.isapple() || return false
+    return ccall(:pthread_set_qos_class_self_np, Cint, (UInt32, Cint), c, 0) == 0
+end
+
+"""
+    qos() -> Symbol
+
+The calling OS thread's quality-of-service class (see [`qos!`](@ref)): `:unspecified` for a thread
+never given one, and off macOS.
+"""
+function qos()
+    Sys.isapple() || return :unspecified
+    c = Ref{UInt32}(0); rel = Ref{Cint}(0)
+    ccall(:pthread_get_qos_class_np, Cint, (UInt, Ref{UInt32}, Ref{Cint}), ccall(:pthread_self, UInt, ()), c, rel)
+    for (k, v) in pairs(QOS_CLASSES); v == c[] && return k; end
+    return :unspecified
+end

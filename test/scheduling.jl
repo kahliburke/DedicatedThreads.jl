@@ -35,6 +35,26 @@ end
     @test_throws ArgumentError Realtime(period = 0.001, priority = 0)
 end
 
+@testset "a pool's quality of service" begin
+    # more threads than the real-time pools left in the cache: those took no class, the new ones did
+    tids = DedicatedPool(6; name = :qos, qos = :interactive) do pool
+        if Sys.isapple()
+            @test count(qos_granted(pool)) >= 2
+            @test count(==(:interactive), [fetch(spawn(qos, pool)) for _ in 1:60]) > 0
+        else
+            @test !any(qos_granted(pool))
+        end
+        threadids(pool)
+    end
+    # the same threads, back from the cache for a pool without one, out of that class
+    DedicatedPool(6; name = :plainqos) do pool
+        @test sort(threadids(pool)) == sort(tids)
+        @test !any(qos_granted(pool)) && !any(fetch.([spawn(qos, pool) for _ in 1:60]) .== :interactive)
+    end
+    @test_throws ArgumentError DedicatedPool(1; qos = :urgent)
+    @test_throws ArgumentError qos!(:urgent)
+end
+
 @testset "waiting on an address" begin
     v = zeros(UInt32, 1)
     GC.@preserve v begin

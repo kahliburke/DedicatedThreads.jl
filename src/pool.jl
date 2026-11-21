@@ -1,8 +1,8 @@
 @enum PoolState::UInt8 OPEN CLOSING CLOSED
 
 """
-    DedicatedPool(n::Integer; name::Symbol, realtime::Union{Nothing,Realtime} = nothing)
-    DedicatedPool(f, n::Integer; name::Symbol, realtime = nothing)
+    DedicatedPool(n::Integer; name::Symbol, realtime::Union{Nothing,Realtime} = nothing, qos::Union{Nothing,Symbol} = nothing)
+    DedicatedPool(f, n::Integer; name::Symbol, realtime = nothing, qos = nothing)
 
 A pool of `n` dedicated OS threads, created at runtime and separate from Julia's `:default` and
 `:interactive` pools. Run work on it with [`spawn`](@ref); tasks it runs, and their children,
@@ -17,12 +17,21 @@ blocking operations (locks, IO, `sleep`, `wait`) free the thread for other pool 
 With `realtime`, each thread asks for real-time scheduling (see [`Realtime`](@ref)) while it
 belongs to the pool, and returns to the ordinary policy when the pool closes; whether the system
 granted it is [`realtime_granted`](@ref).
+
+With `qos` (macOS), each thread is in that quality-of-service class while it belongs to the pool
+(see [`qos!`](@ref)): `:interactive` or `:initiated` for work someone waits on, kept on the
+performance cores. It returns to the class it had when the pool closes. A thread that has been under
+real-time scheduling takes no class; whether each took it is [`qos_granted`](@ref).
 """
 mutable struct DedicatedPool
     const name::Symbol
     const realtime::Union{Nothing,Realtime}
+    const qos::Union{Nothing,Symbol}
     # Whether each worker's real-time request was granted, set as the worker joins.
     const granted::Vector{Bool}
+    # Whether each worker took the pool's quality-of-service class, and the class it had before.
+    const qosgranted::Vector{Bool}
+    const priorqos::Vector{Symbol}
     # One item per worker once it has applied the pool's scheduling policy.
     const joined::Channel{Nothing}
     const workers::Vector{Worker}
@@ -47,9 +56,12 @@ mutable struct DedicatedPool
     # Scope binding `current_pool()` to this pool, for tasks spawned from an empty scope.
     root_scope::Scope
 
-    function DedicatedPool(n::Integer; name::Symbol = default_pool_name(), realtime::Union{Nothing,Realtime} = nothing)
+    function DedicatedPool(n::Integer; name::Symbol = default_pool_name(), realtime::Union{Nothing,Realtime} = nothing,
+                           qos::Union{Nothing,Symbol} = nothing)
         n >= 1 || throw(ArgumentError("a thread pool needs at least one thread, got $n"))
-        pool = new(name, realtime, fill(false, n), Channel{Nothing}(n), Worker[], Threads.SpinLock(), Task[], 0,
+        qos === nothing || haskey(QOS_CLASSES, qos) ||
+            throw(ArgumentError("a quality-of-service class is one of $(join(keys(QOS_CLASSES), ", ")), got $qos"))
+        pool = new(name, realtime, qos, fill(false, n), fill(false, n), fill(:unspecified, n), Channel{Nothing}(n), Worker[], Threads.SpinLock(), Task[], 0,
                    Worker[], 0, OPEN, Threads.Event(), Channel{Nothing}(n), Threads.Event())
         pool.root_scope = Scope(nothing, CURRENT_POOL => pool)
         append!(pool.workers, acquire_workers(Int(n)))
@@ -207,11 +219,16 @@ worker_released!(pool::DedicatedPool) = put!(pool.released, nothing)
 # Runs on worker `index`'s thread as it joins `pool`, before it takes any task.
 function worker_joined!(pool::DedicatedPool, index::Int)
     pool.realtime === nothing || (pool.granted[index] = realtime!(pool.realtime))
+    pool.qos === nothing || (pool.priorqos[index] = qos(); pool.qosgranted[index] = qos!(pool.qos))
     put!(pool.joined, nothing)
 end
 
 # Runs on the worker's thread as it leaves `pool`, so the next pool gets an ordinary thread.
-worker_leaving!(pool::DedicatedPool, index::Int) = pool.granted[index] && realtime!(nothing)
+function worker_leaving!(pool::DedicatedPool, index::Int)
+    pool.granted[index] && realtime!(nothing)
+    pool.qosgranted[index] && (q = pool.priorqos[index]; qos!(q === :unspecified ? :default : q))
+    nothing
+end
 
 """
     realtime_granted(pool::DedicatedPool) -> Vector{Bool}
@@ -220,6 +237,14 @@ For each thread of `pool`, whether the system granted the pool's real-time reque
 for a pool without one.
 """
 realtime_granted(pool::DedicatedPool) = copy(pool.granted)
+
+"""
+    qos_granted(pool::DedicatedPool) -> Vector{Bool}
+
+For each thread of `pool`, whether it took the pool's quality-of-service class; all `false` for a
+pool without one, and off macOS.
+"""
+qos_granted(pool::DedicatedPool) = copy(pool.qosgranted)
 
 """
     close(pool::DedicatedPool)
